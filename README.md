@@ -1,6 +1,49 @@
 # YouTube RAG Assistant
 
-> **"Built a multi-video RAG system that ingests YouTube playlists, retrieves timestamp-grounded answers across sources, and deploys via a single config-driven codebase to both a local dev profile and a rate-limited public demo on Azure."**
+<div align="center">
+
+[![CI](https://github.com/yuvrajgovindrao/YouTubeRAG/actions/workflows/ci.yml/badge.svg)](https://github.com/yuvrajgovindrao/YouTubeRAG/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![PostgreSQL + pgvector](https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?logo=postgresql&logoColor=white)](https://github.com/pgvector/pgvector)
+[![Google Gemini](https://img.shields.io/badge/Google_Gemini-8E75B2?logo=googlegemini&logoColor=white)](https://ai.google.dev/)
+[![React 18](https://img.shields.io/badge/React_18-20232A?logo=react&logoColor=61DAFB)](https://react.dev/)
+[![Vite](https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
+[![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+
+<br />
+
+**A multi-video RAG system that ingests YouTube playlists, retrieves timestamp-grounded answers across sources, and deploys via a single config-driven codebase to both a local dev profile and a rate-limited public demo on Azure.**
+
+</div>
+
+---
+
+## Tech Stack
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                               TECH STACK                                    │
+├───────────────────┬─────────────────────────┬───────────────────────────────┤
+│ Layer             │ Technology              │ Purpose                       │
+├───────────────────┼─────────────────────────┼───────────────────────────────┤
+│ Frontend UI       │ React 18, Vite          │ Interactive Player & Sources  │
+│ Styling           │ Vanilla CSS & Glassmorphism │ Modern Dark Mode UI       │
+│ Video Player      │ YouTube IFrame API      │ Exact Timestamp Seeking       │
+│ Backend API       │ FastAPI (Python 3.12+)  │ Async Endpoints & Pipeline    │
+│ Task Queue        │ FastAPI BackgroundTasks │ Asynchronous Ingestion Jobs   │
+│ Vector Database   │ PostgreSQL 16 + pgvector│ Hybrid Metadata + Vectors     │
+│ Caption Extract   │ youtube-transcript-api  │ Zero-cost Captions Parsing    │
+│ Video Metadata    │ yt-dlp                  │ Fast ID/Playlist Resolution   │
+│ Embeddings        │ Gemini gemini-embedding-001 │ 768-dim Vector Embeddings │
+│ LLM Synthesis     │ Gemini 1.5 Flash        │ Context-Grounded Answer RAG   │
+│ Session Cleanup   │ APScheduler             │ Sliding-Expiry TTL Job        │
+│ Rate Limiting     │ SlowAPI (Limits)        │ Per-session & IP Throttling   │
+│ Containerization  │ Docker & Docker Compose │ One-command clone-and-run     │
+│ CI/CD Automation  │ GitHub Actions          │ Automated Tests & Builds      │
+└───────────────────┴─────────────────────────┴───────────────────────────────┘
+```
 
 ---
 
@@ -39,28 +82,13 @@
 
 ---
 
-## Tech Stack
-
-| Layer | Technology | Purpose |
-|---|---|---|
-| **Backend** | FastAPI (Python 3.12+) | Async REST API & BackgroundTasks |
-| **Database** | PostgreSQL 16 + pgvector | Relational metadata + vector embedding storage |
-| **Captions** | `youtube-transcript-api` | Zero-cost subtitle extraction |
-| **Metadata** | `yt-dlp` | Fast playlist and video ID resolution (no audio download) |
-| **Embeddings** | Gemini (`gemini-embedding-001`) | 768-dimension semantic vector embeddings |
-| **Generation** | Gemini (`gemini-1.5-flash`) | Context-grounded synthesis |
-| **Frontend** | React 18 + Vite | Dark mode, glassmorphism UI, YouTube IFrame API |
-| **Containers** | Docker & Docker Compose | Containerized local and cloud deployment |
-
----
-
 ## Quick Start (Docker Compose)
 
 ### 1. Clone & Configure Environment
 
 ```bash
-git clone <repository-url>
-cd youtube-rag
+git clone https://github.com/yuvrajgovindrao/YouTubeRAG.git
+cd YouTubeRAG
 
 # Configure your Gemini API key in backend/.env
 cp backend/.env.example backend/.env
@@ -154,3 +182,9 @@ pytest backend/tests -v
    - Scale rule: Scale down to 0 replicas when idle to protect Azure credits.
 3. **Frontend:**
    - Deploy the Nginx container or static bundle to Azure Static Web Apps.
+
+---
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
