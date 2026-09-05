@@ -34,10 +34,12 @@
 │ Backend API       │ FastAPI (Python 3.12+)  │ Async Endpoints & Pipeline    │
 │ Task Queue        │ FastAPI BackgroundTasks │ Asynchronous Ingestion Jobs   │
 │ Vector Database   │ PostgreSQL 16 + pgvector│ Hybrid Metadata + Vectors     │
+│ Progress Tracking │ DB-backed live 1–100%   │ Per-video & collection status │
 │ Caption Extract   │ youtube-transcript-api  │ Zero-cost Captions Parsing    │
+│ Anti-Bot Fallback │ yt-dlp (Mobile signed)  │ Bypasses cloud/IP blocks      │
 │ Video Metadata    │ yt-dlp                  │ Fast ID/Playlist Resolution   │
 │ Embeddings        │ Gemini gemini-embedding-001 │ 768-dim Vector Embeddings │
-│ LLM Synthesis     │ Gemini 1.5 Flash        │ Context-Grounded Answer RAG   │
+│ LLM Synthesis     │ Gemini 2.5/3.6 Flash    │ Context-Grounded Answer RAG   │
 │ Session Cleanup   │ APScheduler             │ Sliding-Expiry TTL Job        │
 │ Rate Limiting     │ SlowAPI (Limits)        │ Per-session & IP Throttling   │
 │ Containerization  │ Docker & Docker Compose │ One-command clone-and-run     │
@@ -53,16 +55,19 @@
 ┌─────────────────┐           ┌────────────────────────────┐           ┌──────────────────────┐
 │  Vite + React   │   HTTP    │      FastAPI Backend       │   SQL     │ PostgreSQL + pgvector│
 │  Frontend       │◄─────────►│  - Session Middleware      │◄─────────►│  sessions /          │
-│                 │           │  - URL Parser & Ingestion  │           │  collections /       │
-│  YouTube Player │           │  - Retrieval & Gemini RAG  │           │  videos / chunks /   │
-│  (IFrame API)   │           │  - BackgroundTasks & Clean │           │  jobs                │
+│                 │ (poll 1.2s│  - URL Parser & Ingestion  │           │  collections /       │
+│  YouTube Player │   status) │  - Live Progress (1-100%)  │           │  videos / chunks /   │
+│  (IFrame API)   │           │  - Retrieval & Gemini RAG  │           │  jobs                │
+│                 │           │  - BackgroundTasks & Clean │           │                      │
 └─────────────────┘           └──────────────┬─────────────┘           └──────────────────────┘
                                              │
                           ┌──────────────────┼───────────────────┐
                           ▼                  ▼                   ▼
                    ┌─────────────┐   ┌───────────────┐   ┌────────────────┐
                    │   yt-dlp    │   │   youtube-    │   │   Gemini API   │
-                   │  (metadata) │   │ transcript-api│   │  (Embed & Chat)│
+                   │ (metadata + │   │transcript-api │   │(gemini-embed-  │
+                   │mobile timed-│   │(primary) /    │   │  ding-001 &    │
+                   │  text API)  │   │yt-dlp fallback│   │  2.5/3.6 Flash)│
                    └─────────────┘   └───────────────┘   └────────────────┘
 ```
 
@@ -70,14 +75,24 @@
 
 ## Core Features
 
+- **Real-Time Per-Video Progress Counter (1–100%):**
+  - Live progress feedback on each video card with a gradient mini progress bar and percentage badge:
+    - **`5%`**: Ingestion task initialized and queued.
+    - **`15%`**: Video metadata retrieved (title, duration, thumbnail).
+    - **`35%`**: Transcript/captions extracted and normalized.
+    - **`45%`**: Sentence-aware chunking completed.
+    - **`45% → 90%`**: Dynamic chunk-by-chunk embedding generation via Gemini API.
+    - **`95%`**: Chunks and vectors indexed in PostgreSQL pgvector.
+    - **`100%`**: Completed and marked `Ready (100%)`.
+  - Weighted collection-level progress bar reflects active in-flight processing.
+- **Anti-Bot Resilient Caption Extraction:** Automatically handles cloud host and Docker IP restrictions by attempting `youtube-transcript-api` first, then seamlessly falling back to `yt-dlp`'s signed mobile timedtext extractor (`android`/`ios` client impersonation with Android User-Agent).
 - **Mixed Link Ingestion:** Paste single video links, multiple links, or entire YouTube playlists in one input. Deduplicates by `video_id` automatically.
-- **Configurable 5-Video Cap:** Enforces a priority-based cap (explicit individual links take priority, remainder filled in native playlist order).
-- **Free Transcript Ingestion:** Extracts captions via `youtube-transcript-api` without audio downloads or paid ASR APIs.
+- **Configurable Video Limits:** Configurable via `MAX_VIDEOS_PER_COLLECTION` (e.g. `999` for unlimited local dev, `5` for rate-limited public demos).
 - **Sentence-Aware Chunking:** Segments captions into ~30–60 second speech windows while strictly preserving the initial `start_time` for timestamp seeking.
-- **pgvector Cosine Search:** Fast vector similarity retrieval scoped to the user's active session collection.
-- **Gemini Flash Synthesis:** Answers are synthesized solely from retrieved chunks (preventing hallucinations).
-- **Interactive Single Player:** Embedded YouTube Player API loads the video and seeks to the exact second when a source card is clicked.
-- **Sliding-Expiry Auto-Cleanup:** APScheduler deletes inactive sessions and cascades deletions to collections, videos, chunks, and jobs.
+- **pgvector Cosine Search:** Fast 768-dimensional vector similarity retrieval scoped to the user's active session collection.
+- **Gemini Flash Synthesis with Auto-Fallback:** Synthesizes context-grounded answers solely from retrieved chunks (supporting `gemini-2.5-flash` with auto-fallback to `gemini-3.6-flash`).
+- **Interactive Multi-Source Player:** Embedded YouTube Player API automatically loads the corresponding video and jumps directly to the exact second when any source card or timestamp badge is clicked.
+- **Sliding-Expiry Auto-Cleanup:** APScheduler deletes inactive sessions and cascades deletions to collections, videos, chunks, and jobs after `SESSION_TTL_SECONDS`.
 - **Dual Deployment Profiles:** Run locally without caps via Docker Compose, or deploy to Azure Container Apps with rate limits and session TTL enabled.
 
 ---
@@ -164,8 +179,8 @@ pytest backend/tests -v
 | `SESSION_TTL_SECONDS` | `0` (disabled) | `7200` (2 hours) |
 | `RATE_LIMIT_ENABLED` | `false` | `true` |
 | `RATE_LIMIT_PER_HOUR` | `60` | `10` |
-| `GEMINI_EMBEDDING_MODEL` | `gemini-embedding-001` | `gemini-embedding-001` |
-| `GEMINI_CHAT_MODEL` | `gemini-1.5-flash` | `gemini-1.5-flash` |
+| `GEMINI_EMBEDDING_MODEL` | `gemini-embedding-001` (768-dim) | `gemini-embedding-001` (768-dim) |
+| `GEMINI_CHAT_MODEL` | `gemini-2.5-flash` (auto fallback to `3.6`) | `gemini-2.5-flash` (auto fallback to `3.6`) |
 | `SIMILARITY_THRESHOLD` | `0.55` | `0.55` |
 | `MAX_SOURCES_RETURNED` | `4` | `4` |
 
