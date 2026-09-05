@@ -1,0 +1,241 @@
+# YouTube RAG Assistant — Implementation Plan
+
+## 1. What This Project Is
+
+A web app where a user pastes one or more YouTube video links, multiple links, or a playlist link. The system fetches transcripts, indexes them for semantic search, and lets the user ask natural-language questions about the content. Answers are generated from the actual transcript (RAG, not the LLM's general knowledge), and every answer comes with clickable source cards that jump the embedded player to the exact timestamp where that topic was discussed — across whichever of the ingested videos actually cover it.
+
+**One-line resume pitch:** "Built a multi-video RAG system that ingests YouTube playlists, retrieves timestamp-grounded answers across sources, and deploys via a single config-driven codebase to both a local dev profile and a rate-limited public demo on Azure."
+
+## 2. Core Features
+
+- Accept single video links, multiple links, or a playlist link in one input (mixed input parsed and deduplicated).
+- Hard cap of 5 videos per collection (config-controlled — disabled in local dev profile).
+- Transcript ingestion via YouTube's own captions (no paid ASR).
+- Sentence-aware chunking that preserves original timestamps.
+- Semantic search scoped to the user's own collection (not global).
+- LLM-synthesized detailed answer, generated only from retrieved transcript chunks.
+- Ranked source list under each answer: video thumbnail, title, timestamp, short excerpt — grouped so the same video isn't listed twice.
+- Single embedded YouTube player that loads the correct video and seeks to the correct timestamp when a source card is clicked.
+- Session-based isolation with no login: a session ID scopes all data, so users never see each other's collections.
+- Sliding-expiry auto-cleanup: inactive sessions (and everything tied to them) are deleted automatically.
+- Ingestion progress visibility (so a 5-video batch doesn't look frozen while processing).
+
+## 3. Tech Stack
+
+| Layer | Choice | Why |
+|---|---|---|
+| Backend | FastAPI (Python) | async-friendly, fast to build REST APIs |
+| Video resolution | yt-dlp (metadata only) | resolves playlists/videos to IDs without downloading audio |
+| Transcript source | `youtube-transcript-api` | free, fast, uses YouTube's own captions |
+| Embeddings | Gemini embedding API | separate free quota from chat generation |
+| Answer generation | Gemini (Flash model) | free tier, sufficient for low-traffic demo |
+| Vector storage | PostgreSQL + pgvector | one database for metadata + vectors, supported both locally and on Azure |
+| Background jobs | FastAPI `BackgroundTasks` + Postgres `jobs` table | see note below — no Redis/Celery needed at this scale |
+| Frontend | React (or Next.js) | source cards + embedded YouTube IFrame Player API |
+| Local deployment | Docker Compose | one-command clone-and-run |
+| Hosted deployment | Azure Container Apps (consumption plan) | scales to zero when idle, protects the $100 student credit |
+
+**Correction from earlier planning:** Celery/Redis was floated earlier for handling playlist-scale ingestion. That was written before the 5-video hard cap was decided. At a max of 5 videos and ~2-3 users a week, a real job queue is unnecessary infrastructure to build, run, and pay for. FastAPI's built-in `BackgroundTasks`, combined with a `jobs` status table in Postgres for progress tracking, is sufficient. Revisit only if the cap or traffic assumptions change.
+
+## 4. System Architecture
+
+```
+┌──────────────┐         ┌───────────────────────────┐         ┌────────────────────┐
+│   Frontend    │  HTTP   │       FastAPI Backend       │  SQL    │   PostgreSQL        │
+│ (React/Next)  │◄───────►│  - routers                  │◄───────►│   + pgvector        │
+│               │         │  - services                 │         │  sessions/          │
+│ IFrame Player │         │  - session middleware       │         │  collections/       │
+└──────────────┘         │  - background tasks         │         │  videos/chunks/jobs │
+                          └─────────────┬───────────────┘         └────────────────────┘
+                                        │
+                     ┌──────────────────┼───────────────────┐
+                     ▼                  ▼                   ▼
+              ┌─────────────┐   ┌───────────────┐   ┌────────────────┐
+              │   yt-dlp     │   │ youtube-       │   │   Gemini API    │
+              │ (resolve IDs,│   │ transcript-api │   │ (embeddings +   │
+              │  metadata)   │   │ (captions)     │   │  generation)    │
+              └─────────────┘   └───────────────┘   └────────────────┘
+```
+
+## 5. Data Flow
+
+### Ingestion flow
+1. User submits raw text containing one or more links.
+2. `url_parser` splits on newline/comma/whitespace, classifies each token as `video` or `playlist` via regex.
+3. Resolve all tokens to `video_id`s via yt-dlp (playlists expand to their member video IDs, metadata only — no audio download).
+4. Deduplicate the full batch by `video_id`.
+5. Apply the 5-video cap: explicit individual links take priority, then fill remaining slots from playlist(s) in native order. If anything is dropped, return that fact to the frontend explicitly.
+6. Create a `collection` row (or reuse the session's active one) and a `videos` row per accepted `video_id`, status `pending`.
+7. Kick off a background task per video: fetch transcript → chunk → embed each chunk → store chunks. Update `videos.status` as it progresses (`processing` → `ready` / `failed`).
+8. Frontend polls (or the backend pushes via SSE/WebSocket if you want to build that later) an ingestion status endpoint to show "3/5 videos ready."
+
+### Query flow
+1. User submits a question against a `collection_id`.
+2. Embed the question via Gemini.
+3. Vector search in `chunks`, filtered to `WHERE video_id IN (SELECT video_id FROM videos WHERE collection_id = X)`.
+4. Apply a similarity threshold to drop irrelevant matches; group remaining results by `video_id`, keep the top chunk(s) per video.
+5. Cap the number of distinct videos surfaced as sources (e.g. top 3-4 by best chunk score).
+6. Send the retrieved chunk texts + the question to Gemini, generate one synthesized answer (no inline per-claim citation — see Section 12, "Known Limitations").
+7. Return `{ answer: string, sources: [{video_id, title, thumbnail, start_time, excerpt}] }`.
+8. Frontend renders the answer and a source card per entry; clicking a card calls `loadVideoById` + `seekTo` on the single embedded player.
+
+## 6. Database Schema
+
+```sql
+CREATE TABLE sessions (
+  session_id     UUID PRIMARY KEY,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_active_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE collections (
+  collection_id UUID PRIMARY KEY,
+  session_id    UUID NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE videos (
+  video_id         TEXT NOT NULL,
+  collection_id    UUID NOT NULL REFERENCES collections(collection_id) ON DELETE CASCADE,
+  title            TEXT,
+  thumbnail_url    TEXT,
+  duration_seconds INT,
+  status           TEXT NOT NULL DEFAULT 'pending', -- pending | processing | ready | failed
+  error_message    TEXT,
+  added_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (video_id, collection_id)
+);
+
+CREATE TABLE chunks (
+  chunk_id    UUID PRIMARY KEY,
+  video_id    TEXT NOT NULL,
+  collection_id UUID NOT NULL,
+  start_time  FLOAT NOT NULL,
+  end_time    FLOAT,
+  text        TEXT NOT NULL,
+  embedding   VECTOR(768), -- confirm exact dim against the Gemini embedding model you pick
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (video_id, collection_id) REFERENCES videos(video_id, collection_id) ON DELETE CASCADE
+);
+
+CREATE TABLE jobs (
+  job_id        UUID PRIMARY KEY,
+  collection_id UUID NOT NULL REFERENCES collections(collection_id) ON DELETE CASCADE,
+  video_id      TEXT,
+  status        TEXT NOT NULL DEFAULT 'queued', -- queued | processing | done | failed
+  error_message TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX ON chunks USING ivfflat (embedding vector_cosine_ops);
+```
+
+## 7. API Design
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/collections` | Create a collection for the current session (or return the existing active one) |
+| POST | `/api/collections/{collection_id}/videos` | Submit raw link text; returns accepted `video_id`s, `job_id`s, and any truncation notice |
+| GET | `/api/collections/{collection_id}/status` | Ingestion progress — per-video status |
+| POST | `/api/collections/{collection_id}/ask` | Ask a question; returns answer + ranked sources |
+| DELETE | `/api/collections/{collection_id}` | Manual clear (bonus, on top of automatic sliding expiry) |
+
+Session handling: middleware reads `X-Session-Id` header; if absent or unknown, create a new `sessions` row and return the new ID in the response header for the frontend to store in `localStorage`. Every request that resolves a valid session updates `last_active_at = now()`.
+
+## 8. Chunking Strategy (the part that determines if retrieval actually works)
+
+- Pull raw caption segments (each with its own start/end time) from `youtube-transcript-api`.
+- Merge adjacent raw segments into larger chunks using sentence-boundary heuristics (punctuation-based, or a lightweight sentence splitter) — target roughly 30-60 seconds of speech per chunk, not a fixed segment count.
+- Each merged chunk keeps the `start_time` of its *first* raw sub-segment — that's what gets used for the "jump to timestamp" feature, so it must point to where the topic actually begins, not the middle of it.
+- Auto-generated captions have no punctuation or casing — if you plan to ever display raw transcript excerpts to users (not just LLM-generated answers), consider a cleanup pass; if excerpts are only used as LLM context, this is optional.
+
+## 9. Config & Two Deployment Profiles
+
+Single codebase, environment-driven behavior. No forked repos, no duplicated logic.
+
+| Variable | Local (`.env.example`) | Hosted (`.env.production`) |
+|---|---|---|
+| `MAX_VIDEOS_PER_COLLECTION` | `999` | `5` |
+| `SESSION_TTL_SECONDS` | `0` (disabled) | `7200` |
+| `RATE_LIMIT_ENABLED` | `false` | `true` |
+| `RATE_LIMIT_PER_HOUR` | n/a | `10` |
+| `GEMINI_API_KEY` | user's own key | your key |
+| `GEMINI_EMBEDDING_MODEL` | set explicitly | set explicitly |
+| `GEMINI_CHAT_MODEL` | set explicitly | set explicitly |
+| `DATABASE_URL` | local Docker Postgres | Azure/Neon/Supabase connection string |
+| `SIMILARITY_THRESHOLD` | tune during dev | same, tuned |
+| `MAX_SOURCES_RETURNED` | e.g. `4` | e.g. `4` |
+
+Every enforcement point in the code (video cap check, rate limiter, TTL cleanup) reads from config — never a hardcoded number in business logic.
+
+## 10. Session Lifecycle (Sliding Expiry)
+
+- Any request that resolves a valid `session_id` updates `last_active_at`.
+- A scheduled job (APScheduler running inside the FastAPI process — no separate infra needed at this scale) runs every 10-15 minutes:
+  `DELETE FROM sessions WHERE last_active_at < now() - interval 'SESSION_TTL_SECONDS seconds'`
+  Cascades to collections → videos → chunks automatically via `ON DELETE CASCADE`.
+- Local profile sets TTL to effectively disabled so cloned copies never lose data unexpectedly.
+
+## 11. Rate Limiting & Abuse Protection (hosted profile only)
+
+- Per-`session_id` and per-IP rate limiting on `/videos` and `/ask` endpoints (e.g. `slowapi`).
+- 5-video cap enforced server-side, not just in the UI.
+- Explicit truncation messaging when a playlist exceeds the cap.
+- Azure Cost Management budget alerts configured before deployment, not after.
+- Exponential backoff (1s/2s/4s/8s) wrapping all Gemini calls, since free-tier RPM is low (roughly 10-15/min depending on model) — this matters more during ingestion (many embedding calls per video) than during chat.
+- Ingestion embedding calls run through a concurrency limiter (e.g. semaphore capped at 1-2), never fired in a parallel burst.
+
+## 12. Project Structure
+
+```
+youtube-rag/
+├── backend/
+│   ├── app/
+│   │   ├── main.py
+│   │   ├── config.py                # reads all env vars in one place
+│   │   ├── db.py
+│   │   ├── models.py                # SQLAlchemy models matching schema above
+│   │   ├── middleware/
+│   │   │   └── session.py
+│   │   ├── routers/
+│   │   │   ├── collections.py
+│   │   │   └── ask.py
+│   │   └── services/
+│   │       ├── url_parser.py        # pure function, unit-testable
+│   │       ├── ingestion.py
+│   │       ├── chunking.py
+│   │       ├── embeddings.py
+│   │       ├── retrieval.py
+│   │       └── cleanup.py
+│   ├── migrations/
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   └── .env.example
+├── frontend/
+│   ├── src/
+│   ├── package.json
+│   └── Dockerfile
+├── docker-compose.yml
+└── README.md                        # Quick Start (local) + Live Demo link
+```
+
+## 13. Build Order
+
+1. **Scaffolding** — repo, `docker-compose.yml` (Postgres+pgvector container), FastAPI skeleton, `config.py` reading env vars.
+2. **URL parsing** — `url_parser.py` as a pure function with unit tests: mixed input → deduplicated, capped `video_id` list with precedence rules.
+3. **Single-video ingestion** — yt-dlp metadata + transcript fetch + chunking + embedding + storage, working end to end for one video before touching playlists.
+4. **Job status tracking** — `jobs` table, `BackgroundTasks`, status endpoint.
+5. **Retrieval** — similarity threshold, per-video grouping, cap on sources returned.
+6. **Answer generation** — Gemini call with retrieved chunks, structured `{answer, sources}` response.
+7. **Session middleware + sliding expiry cleanup job.**
+8. **Rate limiting + abuse protection**, env-toggled.
+9. **Frontend** — input box, ingestion progress, answer + source cards, single IFrame player wired to `loadVideoById`/`seekTo`.
+10. **Deployment** — local Docker Compose polish and README; Azure Container Apps + Postgres (or Supabase/Neon) setup; budget alerts before going live.
+
+## 14. Known Limitations / Explicitly Out of Scope for v1
+
+- No inline per-claim citation (Option B from earlier discussion) — answer and sources are shown separately, not sentence-linked. Revisit only after v1 works end to end.
+- No user accounts or cross-session persistence — sessions are throwaway by design.
+- No handling for videos with no captions available at all (no ASR fallback) — such videos should fail gracefully with a clear status message, not silently break ingestion for the whole batch.
+- No multi-language transcript normalization beyond whatever `youtube-transcript-api` returns by default.
