@@ -18,6 +18,13 @@ from app.services.embeddings import embed_texts_batch
 logger = logging.getLogger(__name__)
 
 
+YTDLP_EXTRACTOR_ARGS = {
+    'youtube': {
+        'player_client': ['android', 'ios']
+    }
+}
+
+
 def fetch_video_metadata(video_id: str) -> Dict[str, Any]:
     """Fetches video metadata (title, thumbnail, duration) via yt-dlp without downloading media."""
     url = f"https://www.youtube.com/watch?v={video_id}"
@@ -26,6 +33,7 @@ def fetch_video_metadata(video_id: str) -> Dict[str, Any]:
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False,
+        'extractor_args': YTDLP_EXTRACTOR_ARGS,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -60,6 +68,7 @@ def fetch_transcript_via_ytdlp(video_id: str) -> List[Dict[str, Any]]:
         'skip_download': True,
         'quiet': True,
         'no_warnings': True,
+        'extractor_args': YTDLP_EXTRACTOR_ARGS,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -87,7 +96,7 @@ def fetch_transcript_via_ytdlp(video_id: str) -> List[Dict[str, Any]]:
                     if json3_fmt and json3_fmt.get('url'):
                         req = urllib.request.Request(
                             json3_fmt['url'],
-                            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                            headers={'User-Agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 11)'}
                         )
                         with urllib.request.urlopen(req, timeout=15) as resp:
                             data = json.loads(resp.read().decode('utf-8'))
