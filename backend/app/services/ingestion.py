@@ -5,6 +5,8 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+import json
+import urllib.request
 import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
 
@@ -48,14 +50,77 @@ def fetch_video_metadata(video_id: str) -> Dict[str, Any]:
     }
 
 
+def fetch_transcript_via_ytdlp(video_id: str) -> List[Dict[str, Any]]:
+    """
+    Fallback transcript extractor using yt-dlp's client-impersonated signed timedtext API.
+    Bypasses YouTube IP bans and rate-limits on caption endpoints.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    ydl_opts = {
+        'skip_download': True,
+        'quiet': True,
+        'no_warnings': True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info:
+                return []
+
+            sub_dict = info.get('subtitles', {}) or {}
+            auto_sub_dict = info.get('automatic_captions', {}) or {}
+
+            # Prioritize manual subtitles, then auto captions
+            merged_subs = {**auto_sub_dict, **sub_dict}
+            if not merged_subs:
+                return []
+
+            # Search in order: explicit English, then any available language
+            ordered_langs = ['en', 'en-US', 'en-GB'] + [
+                lang for lang in merged_subs.keys() if lang not in ('en', 'en-US', 'en-GB')
+            ]
+
+            for lang in ordered_langs:
+                if lang in merged_subs:
+                    formats = merged_subs[lang]
+                    json3_fmt = next((f for f in formats if isinstance(f, dict) and f.get('ext') == 'json3'), None)
+                    if json3_fmt and json3_fmt.get('url'):
+                        req = urllib.request.Request(
+                            json3_fmt['url'],
+                            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                        )
+                        with urllib.request.urlopen(req, timeout=15) as resp:
+                            data = json.loads(resp.read().decode('utf-8'))
+                            segments = []
+                            for event in data.get('events', []):
+                                segs = event.get('segs')
+                                if not segs:
+                                    continue
+                                text = ''.join(s.get('utf8', '') for s in segs).strip()
+                                if text and text != '\n':
+                                    start = round(float(event.get('tStartMs', 0)) / 1000.0, 2)
+                                    duration = round(float(event.get('dDurationMs', 0)) / 1000.0, 2)
+                                    segments.append({
+                                        'start': start,
+                                        'duration': duration,
+                                        'text': text
+                                    })
+                            if segments:
+                                return segments
+    except Exception as e:
+        logger.warning(f"yt-dlp subtitle extraction error for {video_id}: {e}")
+
+    return []
+
+
 def fetch_video_transcript(video_id: str) -> List[Dict[str, Any]]:
     """
-    Fetches raw caption segments via youtube-transcript-api.
-    Supports both youtube-transcript-api v1.0+ (instance API with to_raw_data())
-    and legacy v0.x (class-level get_transcript/list_transcripts).
+    Fetches raw caption segments via youtube-transcript-api,
+    with an automatic fallback to yt-dlp signed timedtext extraction
+    when IP bans, RequestBlocked, or missing transcripts occur.
     """
+    # 1. Try youtube-transcript-api first
     try:
-        # Check for v1.0+ instance-based API
         try:
             api = YouTubeTranscriptApi()
             if hasattr(api, "fetch"):
@@ -63,25 +128,27 @@ def fetch_video_transcript(video_id: str) -> List[Dict[str, Any]]:
                     fetched = api.fetch(video_id, languages=["en", "en-US", "en-GB"])
                     return fetched.to_raw_data()
                 except Exception:
-                    # Fallback to any available language transcript in the list
                     t_list = api.list(video_id)
                     for t in t_list:
                         return t.fetch().to_raw_data()
         except TypeError:
             pass
 
-        # Legacy fallback for v0.x class-based API
         if hasattr(YouTubeTranscriptApi, "get_transcript"):
             return YouTubeTranscriptApi.get_transcript(video_id)
+    except Exception as err:
+        logger.info(f"youtube-transcript-api failed for {video_id} ({err}); falling back to yt-dlp...")
 
-        raise RuntimeError("No compatible transcript retrieval method found on YouTubeTranscriptApi.")
+    # 2. Fallback to yt-dlp signed timedtext extraction (bypasses IP blocks)
+    try:
+        ytdlp_segments = fetch_transcript_via_ytdlp(video_id)
+        if ytdlp_segments:
+            logger.info(f"Successfully retrieved {len(ytdlp_segments)} caption segments via yt-dlp for {video_id}")
+            return ytdlp_segments
+    except Exception as fallback_err:
+        logger.warning(f"yt-dlp fallback also failed for {video_id}: {fallback_err}")
 
-    except (TranscriptsDisabled, NoTranscriptFound):
-        raise RuntimeError("No captions or transcripts are available for this video.")
-    except VideoUnavailable:
-        raise RuntimeError("This video is unavailable, private, or restricted.")
-    except Exception as e:
-        raise RuntimeError(f"Could not retrieve transcript: {str(e)}")
+    raise RuntimeError("No captions or transcripts could be retrieved for this video.")
 
 
 async def process_video_ingestion(
