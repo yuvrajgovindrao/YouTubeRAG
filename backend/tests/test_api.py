@@ -2,13 +2,14 @@ import pytest
 import uuid
 import httpx
 from app.main import app
-from app.db import engine
+from app.db import engine, init_db
 
 transport = httpx.ASGITransport(app=app)
 
 
 @pytest.fixture(autouse=True)
 async def cleanup_db():
+    await init_db()
     yield
     await engine.dispose()
 
