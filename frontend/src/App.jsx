@@ -83,7 +83,7 @@ export default function App() {
         } catch (e) {
           console.error('Status poll error:', e);
         }
-      }, 2500);
+      }, 1200);
     } else {
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current);

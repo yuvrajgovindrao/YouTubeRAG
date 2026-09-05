@@ -34,6 +34,7 @@ class VideoItemStatus(BaseModel):
     thumbnail_url: Optional[str] = None
     duration_seconds: Optional[int] = None
     status: str
+    progress_percent: int = 0
     error_message: Optional[str] = None
 
 
@@ -231,6 +232,10 @@ async def get_collection_status(
         else:
             pending += 1
 
+        prog = getattr(v, "progress_percent", 0) or 0
+        if v.status == "ready":
+            prog = 100
+
         items.append(
             VideoItemStatus(
                 video_id=v.video_id,
@@ -238,6 +243,7 @@ async def get_collection_status(
                 thumbnail_url=v.thumbnail_url,
                 duration_seconds=v.duration_seconds,
                 status=v.status,
+                progress_percent=prog,
                 error_message=v.error_message
             )
         )

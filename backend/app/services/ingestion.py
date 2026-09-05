@@ -178,8 +178,19 @@ async def process_video_ingestion(
     logger.info(f"Starting ingestion for video {video_id} in collection {collection_id}")
 
     async with async_session_factory() as db:
+        async def update_progress(pct: int):
+            try:
+                await db.execute(
+                    update(VideoModel)
+                    .where(VideoModel.video_id == video_id, VideoModel.collection_id == collection_id)
+                    .values(progress_percent=pct)
+                )
+                await db.commit()
+            except Exception as err:
+                logger.warning(f"Could not update progress to {pct}% for {video_id}: {err}")
+
         try:
-            # 1. Mark job and video as processing
+            # 1. Mark job and video as processing (5%)
             now = datetime.now(timezone.utc)
             await db.execute(
                 update(JobModel)
@@ -189,11 +200,11 @@ async def process_video_ingestion(
             await db.execute(
                 update(VideoModel)
                 .where(VideoModel.video_id == video_id, VideoModel.collection_id == collection_id)
-                .values(status="processing")
+                .values(status="processing", progress_percent=5)
             )
             await db.commit()
 
-            # 2. Fetch metadata in thread pool
+            # 2. Fetch metadata in thread pool (15%)
             loop = asyncio.get_running_loop()
             meta = await loop.run_in_executor(None, fetch_video_metadata, video_id)
             
@@ -203,14 +214,16 @@ async def process_video_ingestion(
                 .values(
                     title=meta["title"],
                     thumbnail_url=meta["thumbnail_url"],
-                    duration_seconds=meta["duration_seconds"]
+                    duration_seconds=meta["duration_seconds"],
+                    progress_percent=15
                 )
             )
             await db.commit()
 
-            # 3. Fetch transcript
+            # 3. Fetch transcript (35%)
             try:
                 raw_segments = await loop.run_in_executor(None, fetch_video_transcript, video_id)
+                await update_progress(35)
             except Exception as e:
                 error_msg = str(e)
                 logger.warning(f"Transcript unavailable for {video_id}: {error_msg}")
@@ -227,7 +240,7 @@ async def process_video_ingestion(
                 await db.commit()
                 return
 
-            # 4. Chunk transcript
+            # 4. Chunk transcript (45%)
             chunks_data = chunk_transcript(raw_segments, min_duration=30.0, max_duration=60.0)
             if not chunks_data:
                 err = "No text content found in transcript."
@@ -244,11 +257,19 @@ async def process_video_ingestion(
                 await db.commit()
                 return
 
-            # 5. Generate embeddings
-            chunk_texts = [c["text"] for c in chunks_data]
-            embeddings = await embed_texts_batch(chunk_texts)
+            await update_progress(45)
 
-            # 6. Delete any existing chunks for this video in collection, then insert new chunks
+            # 5. Generate embeddings with live progress updates (45% -> 90%)
+            chunk_texts = [c["text"] for c in chunks_data]
+
+            async def on_embedding_progress(done_count: int, total_count: int):
+                pct = 45 + int(45 * (done_count / max(1, total_count)))
+                await update_progress(min(pct, 90))
+
+            embeddings = await embed_texts_batch(chunk_texts, on_progress=on_embedding_progress)
+
+            # 6. Insert new chunks into vector store (95%)
+            await update_progress(95)
             chunk_models = []
             for c_info, emb in zip(chunks_data, embeddings):
                 chunk_models.append(
@@ -263,12 +284,13 @@ async def process_video_ingestion(
                     )
                 )
             db.add_all(chunk_models)
+            await db.commit()
 
-            # 7. Update status to ready
+            # 7. Update status to ready (100%)
             await db.execute(
                 update(VideoModel)
                 .where(VideoModel.video_id == video_id, VideoModel.collection_id == collection_id)
-                .values(status="ready", error_message=None)
+                .values(status="ready", progress_percent=100, error_message=None)
             )
             await db.execute(
                 update(JobModel)

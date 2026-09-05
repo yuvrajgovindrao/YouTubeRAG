@@ -42,6 +42,8 @@ async def init_db() -> None:
             await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
             # Create tables
             await conn.run_sync(Base.metadata.create_all)
+            # Add progress_percent column if not already present on existing table
+            await conn.execute(text("ALTER TABLE videos ADD COLUMN IF NOT EXISTS progress_percent INT NOT NULL DEFAULT 0;"))
             logger.info("Database tables initialized successfully with pgvector.")
     except Exception as e:
         logger.error(f"Error during database initialization: {e}")

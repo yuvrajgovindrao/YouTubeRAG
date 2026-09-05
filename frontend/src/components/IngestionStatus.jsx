@@ -14,7 +14,14 @@ export default function IngestionStatus({ statusData, onClearCollection, isClear
   }
 
   const { total_videos, ready_count, processing_count, failed_count, pending_count, is_complete, videos } = statusData;
-  const progressPercent = total_videos > 0 ? Math.round((ready_count / total_videos) * 100) : 0;
+
+  // Calculate overall collection progress including in-flight video percentages
+  const totalProgressSum = videos.reduce((acc, v) => {
+    if (v.status === 'ready') return acc + 100;
+    if (v.status === 'processing') return acc + (v.progress_percent || 0);
+    return acc;
+  }, 0);
+  const progressPercent = total_videos > 0 ? Math.round(totalProgressSum / total_videos) : 0;
 
   return (
     <div className="glass-panel" style={{ padding: '1.5rem', marginBottom: '1.5rem' }}>
@@ -24,7 +31,7 @@ export default function IngestionStatus({ statusData, onClearCollection, isClear
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <Video size={18} color="#ef4444" />
             <h3 style={{ fontSize: '1.05rem', fontWeight: 700, color: '#f8fafc' }}>
-              Collection Index Status ({ready_count}/{total_videos} Ready)
+              Collection Index Status ({ready_count}/{total_videos} Ready &bull; {progressPercent}%)
             </h3>
           </div>
           <p style={{ fontSize: '0.8rem', color: '#94a3b8', marginTop: '0.2rem' }}>
@@ -63,7 +70,7 @@ export default function IngestionStatus({ statusData, onClearCollection, isClear
             height: '100%',
             background: is_complete
               ? 'linear-gradient(90deg, #10b981 0%, #059669 100%)'
-              : 'linear-gradient(90deg, #ef4444 0%, #f59e0b 100%)',
+              : 'linear-gradient(90deg, #3b82f6 0%, #06b6d4 100%)',
             transition: 'width 0.4s ease',
             borderRadius: '9999px',
           }}
@@ -77,14 +84,16 @@ export default function IngestionStatus({ statusData, onClearCollection, isClear
           let StatusIcon = Clock;
           let statusLabel = 'Queued';
 
+          const pct = vid.progress_percent || 0;
+
           if (vid.status === 'ready') {
             badgeClass = 'badge-ready';
             StatusIcon = CheckCircle2;
-            statusLabel = 'Ready for Search';
+            statusLabel = 'Ready (100%)';
           } else if (vid.status === 'processing') {
             badgeClass = 'badge-processing';
             StatusIcon = Loader2;
-            statusLabel = 'Processing Captions...';
+            statusLabel = `Processing (${pct}%)`;
           } else if (vid.status === 'failed') {
             badgeClass = 'badge-failed';
             StatusIcon = AlertCircle;
@@ -98,10 +107,13 @@ export default function IngestionStatus({ statusData, onClearCollection, isClear
                 display: 'flex',
                 alignItems: 'center',
                 gap: '0.85rem',
-                padding: '0.6rem 0.85rem',
+                padding: '0.65rem 0.85rem',
                 background: 'rgba(11, 15, 25, 0.6)',
                 borderRadius: '10px',
-                border: '1px solid rgba(255, 255, 255, 0.05)',
+                border: vid.status === 'processing'
+                  ? '1px solid rgba(56, 189, 248, 0.3)'
+                  : '1px solid rgba(255, 255, 255, 0.05)',
+                transition: 'all 0.3s ease',
               }}
             >
               <img
@@ -142,6 +154,31 @@ export default function IngestionStatus({ statusData, onClearCollection, isClear
                     </span>
                   )}
                 </div>
+
+                {/* Individual Video Progress Bar when Processing */}
+                {vid.status === 'processing' && (
+                  <div style={{ marginTop: '0.35rem', width: '100%', maxWidth: '280px' }}>
+                    <div
+                      style={{
+                        width: '100%',
+                        height: '4px',
+                        background: 'rgba(255, 255, 255, 0.1)',
+                        borderRadius: '9999px',
+                        overflow: 'hidden',
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: `${Math.max(5, pct)}%`,
+                          height: '100%',
+                          background: 'linear-gradient(90deg, #3b82f6 0%, #06b6d4 100%)',
+                          transition: 'width 0.3s ease-in-out',
+                          borderRadius: '9999px',
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className={`badge ${badgeClass}`} style={{ flexShrink: 0 }}>

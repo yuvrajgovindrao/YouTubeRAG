@@ -85,6 +85,9 @@ class VideoModel(Base):
     status: Mapped[str] = mapped_column(
         String, default="pending", nullable=False
     )  # pending | processing | ready | failed
+    progress_percent: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
     error_message: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False

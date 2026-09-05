@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import List, Optional
+from typing import List, Optional, Callable, Awaitable
 import httpx
 from app.config import settings
 
@@ -24,10 +24,14 @@ async def embed_text(text: str) -> List[float]:
     return results[0]
 
 
-async def embed_texts_batch(texts: List[str]) -> List[List[float]]:
+async def embed_texts_batch(
+    texts: List[str],
+    on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None
+) -> List[List[float]]:
     """
     Generates embeddings for a batch of texts.
     Processes sequentially or in small sub-batches to respect rate limits.
+    Optionally invokes on_progress(completed_count, total_count) after each item.
     """
     if not texts:
         return []
@@ -37,11 +41,17 @@ async def embed_texts_batch(texts: List[str]) -> List[List[float]]:
         return [[0.0] * settings.EMBEDDING_DIMENSION for _ in texts]
 
     results: List[List[float]] = []
+    total = len(texts)
     
     # Process texts through the concurrency limiter
-    for text in texts:
+    for idx, text in enumerate(texts):
         vector = await _embed_single_with_retry(text)
         results.append(vector)
+        if on_progress:
+            try:
+                await on_progress(idx + 1, total)
+            except Exception as e:
+                logger.warning(f"Error in on_progress callback: {e}")
 
     return results
 
